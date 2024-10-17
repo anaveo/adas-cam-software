@@ -1,0 +1,31 @@
+{
+    "version": 1,
+    "disable_existing_loggers": false,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "DEBUG",
+            "formatter": "detailed",
+            "stream": "ext://sys.stdout"
+        },
+        "udp": {
+            "class": "src.services.UDPHandler",
+            "level": "INFO",
+            "formatter": "detailed",
+            "ip": "10.0.0.1",  // TODO: Replace with your IP
+            "port": 5005  // TODO: Replace with your port
+        }
+    },
+    "loggers": {
+        "model.diagnostic_model": {
+            "level": "DEBUG",
+            "handlers": ["console", "udp"],
+            "propagate": false
+        }
+    },
+    "formatters": {
+        "detailed": {
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        }
+    }
+}
