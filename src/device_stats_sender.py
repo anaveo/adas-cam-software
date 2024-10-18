@@ -37,7 +37,8 @@ class DeviceStatsSender:
             while self._running:
                 logger.info("Sending device stats...")
                 core_temp = int(psutil.sensors_temperatures()['cpu_thermal'][0].current)
-                cpu_usage = int(psutil.cpu_percent(interval=1))
+                cpu_usage_lst = psutil.cpu_percent(interval=None, percpu=True)
+                cpu_usage = int(max(cpu_usage_lst))
 
                 # Send CAN message based on health/fault conditions
                 if 60 < core_temp <= 70:
