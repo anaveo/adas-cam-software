@@ -11,16 +11,15 @@ from src.device_stats_sender import DeviceStatsSender
 from src.services.network_manager import NetworkManager
 from src.services.can_manager import CanManager
 
+from src.services.udp_logger import UDPLogger
 import logging
 logger = logging.getLogger('main')
 
 
-def setup_logging(config_path=None):
-    if config_path is None:
-        # Get the absolute path of the directory where this script is located
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        # Construct the absolute path to the logging_config.json file
-        config_path = os.path.join(script_dir, '../config/logging_config.json')
+def setup_logging(config_path='../config/logging_config.json'):
+    # Get the absolute path of the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, config_path)
 
     with open(config_path, 'r') as f:
         config = json.load(f)
@@ -36,6 +35,7 @@ class Application:
         self.loop = asyncio.get_event_loop()
 
     async def start(self):
+
         # Set up necessary configurations
         script_dir = os.path.dirname(os.path.abspath(__file__))
         can_config_path = os.path.join(script_dir, '../config/can_config.json')
@@ -53,7 +53,7 @@ class Application:
         self.device_stats_sender = DeviceStatsSender()
         await self.device_stats_sender.start()
 
-        logger.info("Application started. Running device stats sender asynchronously.")
+        logger.info("Application started")
 
         # Keep the event loop running
         await asyncio.Event().wait()  # Keep the asyncio event loop alive
@@ -78,8 +78,12 @@ class Application:
         # Stop all resources
         await self.stop()
 
+        # Call the close method on the UDP logger
+        for handler in logger.handlers:
+            if isinstance(handler, UDPLogger):
+                handler.close()
+
         # Stop the event loop
-        logger.info("Shutting down event loop.")
         self.loop.stop()  # Gracefully stop the loop
 
         logger.info("Application shutdown complete.")
@@ -91,7 +95,7 @@ async def main():
 
     # Register a signal handler for clean shutdown (e.g., Ctrl+C or kill signal)
     def handle_signal(signal, frame):
-        logger.info(f"Received signal {signal}. Initiating shutdown...")
+        logger.info(f"Received signal: {signal}")
         asyncio.create_task(app.shutdown_callback())  # Trigger the shutdown callback
 
     signal.signal(signal.SIGINT, handle_signal)

@@ -1,0 +1,34 @@
+{
+  "0x520": {
+    "description": "left-camera-data",
+    "dlc": 4
+  },
+  "0x530": {
+    "description": "right-camera-data",
+    "dlc": 4
+  },
+  "0x320": {
+    "description": "left-camera-fault",
+    "dlc": 1
+  },
+  "0x330": {
+    "description": "right-camera-fault",
+    "dlc": 1
+  },
+  "0x820": {
+    "description": "left-camera-command",
+    "dlc": 0
+  },
+  "0x830": {
+    "description": "right-camera-command",
+    "dlc": 0
+  },
+  "0x400": {
+    "description": "day-night-mode",
+    "dlc": 1
+  },
+  "0x100": {
+    "description": "shutdown",
+    "dlc": 0
+  }
+}

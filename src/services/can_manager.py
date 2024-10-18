@@ -47,11 +47,14 @@ class CanManager:
 
             # Define the filter for CAN IDs 0x100 to 0x4FF
             filters = [
-                {"id": 0x100, "can_mask": 0x700, "extended": False},  # Filter for 0x100 to 0x4FF
+                {"can_id": 0x100, "can_mask": 0x7FF, "extended": False},
+                # TODO: Have filter decided by config file
+                {"can_id": 0x820, "can_mask": 0x7FF, "extended": False}
+                # {"can_id": 0x830, "can_mask": 0x7FF, "extended": False}
             ]
 
             # Set the filters on the bus
-            # self.can_interface.set_filters(filters)
+            self.can_interface.set_filters(filters)
 
             # Start an asyncio task for reading CAN messages
             self.loop.create_task(self.read_can_messages())
@@ -146,6 +149,6 @@ class CanManager:
         try:
             message = can.Message(arbitration_id=message_id, data=data, is_extended_id=False)
             self.can_interface.send(message)
-            logger.info(f"Sent CAN message ID {message_id}: {data}")
+            logger.info(f"Sent CAN message ID {hex(message_id)}: {data}")
         except Exception as e:
             logger.error(f"Error sending CAN message ID {hex(message_id)}: {e}")

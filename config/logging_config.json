@@ -4,21 +4,36 @@
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            "level": "DEBUG",
-            "formatter": "detailed",
+            "level": "WARNING",
+            "formatter": "simple",
             "stream": "ext://sys.stdout"
         },
         "udp": {
-            "class": "src.services.UDPHandler",
-            "level": "INFO",
-            "formatter": "detailed",
-            "ip": "10.0.0.1",  // TODO: Replace with your IP
-            "port": 5005  // TODO: Replace with your port
+            "class": "src.services.udp_logger.UDPLogger",
+            "level": "WARNING",
+            "formatter": "simple",
+            "ip": "10.0.0.1",
+            "port": 5013
         }
     },
     "loggers": {
-        "model.diagnostic_model": {
-            "level": "DEBUG",
+        "main": {
+            "level": "INFO",
+            "handlers": ["udp"],
+            "propagate": false
+        },
+        "device_stats_sender": {
+            "level": "WARNING",
+            "handlers": ["udp"],
+            "propagate": false
+        },
+        "services.can_manager": {
+            "level": "WARNING",
+            "handlers": ["udp"],
+            "propagate": false
+        },
+        "services.network_manager": {
+            "level": "WARNING",
             "handlers": ["console", "udp"],
             "propagate": false
         }
@@ -26,6 +41,9 @@
     "formatters": {
         "detailed": {
             "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        },
+        "simple": {
+            "format": "%(asctime)s - %(module)s - %(levelname)s - %(message)s"
         }
     }
 }
