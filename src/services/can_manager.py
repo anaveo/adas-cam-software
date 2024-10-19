@@ -1,154 +1,160 @@
-import asyncio
-import os
+from multiprocessing import Queue, Process
 import can
-import json
+import time
 import logging
+import threading
+import os
 import binascii
+
 logger = logging.getLogger('services.can_manager')
 
 
-class CanManager:
-    _instance = None
+class CanManager(Process):
+    def __init__(self, command_queue: Queue):
+        super().__init__()
+        self.id_subscriber_map = {}  # Map from CAN ID to list of queues (subscribers)
+        self.subscriber_id_map = {}  # Map from queue (subscriber) to list of CAN IDs
+        self.is_running = False
+        self.bus = None
 
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(CanManager, cls).__new__(cls)
-        return cls._instance
+        # CAN output queue
+        self.command_queue = command_queue
 
-    def __init__(self, can_config_path='../config/can_config.json', loop: asyncio.AbstractEventLoop = None):
-        if not hasattr(self, 'initialized'):  # Ensures `__init__` only runs once
-            self.msg_table = {}
-            with open(can_config_path, 'r') as f:
-                self.msg_table = json.load(f)
+        # Create a lock for thread-safe operations
+        self.lock = threading.Lock()
 
-            self.loop = loop or asyncio.get_event_loop()
-            self.id_callback_map = {}
-            self.callback_id_map = {}
-            self.can_interface = None
-            self.is_running = False
-            self.initialized = True
+        # Create threads for receiving and sending CAN messages
+        self.receiver_thread = threading.Thread(target=self._receive_can_messages)
+        self.sender_thread = threading.Thread(target=self._send_can_messages)
 
-    def __call__(self):
-        """Returns the same instance every time the class is called."""
-        return self._instance
+    def start(self, bitrate=125000, interface='can0'):
+        """Start the CAN transceiver threads."""
+        self.is_running = True
+        logger.info("Setting up CAN interface...")
+        # Configure CAN interface (e.g., bitrate)
+        os.system(f'sudo ip link set {interface} type can bitrate {bitrate}')
+        os.system(f'sudo ifconfig {interface} up')
 
-    async def start(self, bitrate=125000, interface='can0'):
-        """
-        Initializes and starts the CAN interface.
-        """
+        # Initialize your CAN interface (e.g., socketcan, see python-can documentation)
+        self.bus = can.interface.Bus(channel=interface, bustype='socketcan')  # Replace with your config
+
+        self.receiver_thread.start()
+        self.sender_thread.start()
+
+    def stop(self, interface='can0'):
+        """Stop the CAN transceiver threads."""
+        self.is_running = False
+
+        # Signal the threads to wake up and exit
+        self.command_queue.put(None)  # Ensure the sender thread exits if waiting for a message
+
+        # Wait for both threads to complete
+        self.receiver_thread.join()
+        self.sender_thread.join()
+
+        # Clean up CAN interface
         try:
-            logger.info("Setting up CAN interface...")
-            # Configure CAN interface (e.g., bitrate)
-            os.system(f'sudo ip link set {interface} type can bitrate {bitrate}')
-            os.system(f'sudo ifconfig {interface} up')
-
-            # Set up the CAN interface with python-can
-            self.can_interface = can.ThreadSafeBus(channel=interface, bustype='socketcan')
-
-            # Define the filter for CAN IDs 0x100 to 0x4FF
-            filters = [
-                {"can_id": 0x100, "can_mask": 0x7FF, "extended": False},
-                # TODO: Have filter decided by config file
-                {"can_id": 0x820, "can_mask": 0x7FF, "extended": False}
-                # {"can_id": 0x830, "can_mask": 0x7FF, "extended": False}
-            ]
-
-            # Set the filters on the bus
-            self.can_interface.set_filters(filters)
-
-            # Start an asyncio task for reading CAN messages
-            self.loop.create_task(self.read_can_messages())
-            self.is_running = True
-            logger.info(f"CAN Bus started on interface {interface} with bitrate {bitrate}")
+            os.system(f'sudo ifconfig {interface} down')
+            self.is_running = False
+            logger.info(f"CAN Bus on interface {interface} stopped.")
         except Exception as e:
-            logger.error(f"Error starting CAN Bus on interface {interface}: {e}")
+            logger.error(f"Error stopping CAN Bus: {e}")
 
-    async def stop(self, interface='can0'):
-        """
-        Stops the CAN interface.
-        """
-        if self.is_running:
-            try:
-                os.system(f'sudo ifconfig {interface} down')
-                self.is_running = False
-                logger.info(f"CAN Bus on interface {interface} stopped.")
-            except Exception as e:
-                logger.error(f"Error stopping CAN Bus: {e}")
+        logger.info("CAN Manager stopped and resources cleaned up.")
 
-    async def read_can_messages(self):
-        """
-        Asynchronously reads CAN messages from the bus and dispatches them to registered id_callback_map.
-        """
+    def _validate_can_id(self, can_id: int):
+        """Validates the CAN ID for the standard 11-bit identifier."""
+        if not isinstance(can_id, int):
+            raise TypeError(f"CAN ID must be an integer, got {type(can_id)}")
+        if can_id < 0 or can_id >= 0x800:
+            raise ValueError(f"CAN ID {hex(can_id)} is out of range (must be a 11-bit identifier)")
+
+    def register_subscriber_single_id(self, can_id: int, queue: Queue):
+        """Add a subscriber for a specific CAN ID."""
+        self._validate_can_id(can_id)
+
+        with self.lock:  # Ensure thread safety
+            # Add the queue to id_subscriber_map
+            if can_id not in self.id_subscriber_map:
+                self.id_subscriber_map[can_id] = set()
+            self.id_subscriber_map[can_id].add(queue)
+
+            # Add the CAN ID to subscriber_id_map for the specific queue
+            if queue not in self.subscriber_id_map:
+                self.subscriber_id_map[queue] = set()
+            self.subscriber_id_map[queue].add(can_id)
+
+            logger.info(f"Subscriber queue registered for CAN ID {hex(can_id)}")
+
+    def register_subscriber_range_id(self, can_id_high: int, can_id_low: int, queue: Queue):
+        """Add a subscriber for a range of CAN IDs."""
+        self._validate_can_id(can_id_high)
+        self._validate_can_id(can_id_low)
+
+        if can_id_high < can_id_low:
+            raise ValueError(f"Lower CAN ID {can_id_low} greater than upper CAN ID {can_id_high}")
+
+        with self.lock:  # Ensure thread safety
+            for can_id in range(can_id_low, can_id_high + 1):
+                if can_id not in self.id_subscriber_map:
+                    self.id_subscriber_map[can_id] = set()
+                self.id_subscriber_map[can_id].add(queue)
+
+            if queue not in self.subscriber_id_map:
+                self.subscriber_id_map[queue] = set()
+            for can_id in range(can_id_low, can_id_high + 1):
+                self.subscriber_id_map[queue].add(can_id)
+
+            logger.info(f"Callback registered for CAN message ID range {hex(can_id_high)} to {hex(can_id_low)}")
+
+    def deregister_subscriber(self, can_id: int, queue: Queue):
+        """Remove a subscriber from a specific CAN ID."""
+        with self.lock:  # Ensure thread safety
+            if can_id not in self.id_subscriber_map or queue not in self.subscriber_id_map:
+                raise ValueError(f"CAN ID {can_id} or queue {queue} not previously registered")
+
+            # Remove the queue from id_subscriber_map
+            if can_id in self.id_subscriber_map:
+                if queue in self.id_subscriber_map[can_id]:
+                    self.id_subscriber_map[can_id].remove(queue)
+
+                # If there are no more subscribers for this CAN ID, clean it up
+                if not self.id_subscriber_map[can_id]:
+                    del self.id_subscriber_map[can_id]
+
+            # Remove the CAN ID from subscriber_id_map
+            if queue in self.subscriber_id_map:
+                if can_id in self.subscriber_id_map[queue]:
+                    self.subscriber_id_map[queue].remove(can_id)
+
+                # If there are no more CAN IDs for this queue, clean it up
+                if not self.subscriber_id_map[queue]:
+                    del self.subscriber_id_map[queue]
+
+            logger.info(f"Subscriber queue {queue} deregistered for CAN ID {hex(can_id)}")
+
+    def _receive_can_messages(self):
+        """Reads CAN messages from the bus and dispatches them to specified queues."""
         while self.is_running:
             try:
-                # Receive message from the CAN bus
-                message = self.can_interface.recv(timeout=1)  # Blocking read with timeout
+                message = self.bus.recv(timeout=1)  # Blocking read with timeout
                 if message is not None:
-                    logger.info(f"Received CAN message: {hex(message.arbitration_id)} - {binascii.hexlify(message.data)}")
-                    await self.dispatch_message(message)
+                    can_id = message.arbitration_id
+                    logger.info(f"Received CAN message: {hex(can_id)} - {binascii.hexlify(message.data)}")
+                    if can_id in self.id_subscriber_map:
+                        for queue in self.id_subscriber_map[can_id]:
+                            queue.put(message)
             except Exception as e:
-                logger.error(f"Error reading CAN message: {e}")
-            await asyncio.sleep(0.01)  # Avoids busy-waiting
+                logger.error(f"Error reading/processing CAN message: {e}")
 
-    async def dispatch_message(self, message):
-        """
-        Dispatches received CAN message to registered id_callback_map based on the message ID.
-        """
-        message_id = message.arbitration_id
-        if message_id in self.id_callback_map:
-            for callback in self.id_callback_map[message_id]:
-                try:
-                    # Call the callback asynchronously
-                    await callback(message)
-                except Exception as e:
-                    logger.error(f"Error in callback for message ID {hex(message_id)}: {e}")
-        else:
-            logger.warning(f"No callback registered for CAN message ID {hex(message_id)}")
-
-    def register_callback_single_id(self, message_id, callback):
-        """
-        Registers a callback for a specific CAN message ID.
-        """
-        if callback not in self.callback_id_map:
-            self.callback_id_map[callback] = []
-        self.callback_id_map[callback].append(message_id)
-        if message_id not in self.id_callback_map:
-            self.id_callback_map[message_id] = []
-        self.id_callback_map[message_id].append(callback)
-        logger.info(f"Callback registered for CAN message ID {hex(message_id)}")
-
-    def register_callback_range_id(self, message_id_low, message_id_high, callback):
-        """
-        Registers a callback for a range of CAN message IDs.
-        """
-        if callback not in self.callback_id_map:
-            self.callback_id_map[callback] = []
-        for (message_id) in range(message_id_low, message_id_high+1):
-            self.callback_id_map[callback].append(message_id)
-            if message_id not in self.id_callback_map:
-                self.id_callback_map[message_id] = []
-            self.id_callback_map[message_id].append(callback)
-        logger.info(f"Callback registered for CAN message ID range {hex(message_id_low)} to {hex(message_id_high)}")
-
-    def unregister_callback(self, callback):
-        """
-        Unregisters a callback for a specific CAN message ID.
-        """
-        if callback in self.callback_id_map:
-            for message_id in self.callback_id_map[callback]:
-                self.id_callback_map[message_id].remove(callback)
-                if not self.id_callback_map[message_id]:
-                    del self.id_callback_map[message_id]
-            del self.callback_id_map[callback]
-            logger.info("Callback unregistered")
-
-    async def send_can_message(self, message_id, data, interface='can0'):
-        """
-        Sends a CAN message.
-        """
-        try:
-            message = can.Message(arbitration_id=message_id, data=data, is_extended_id=False)
-            self.can_interface.send(message)
-            logger.info(f"Sent CAN message ID {hex(message_id)}: {data}")
-        except Exception as e:
-            logger.error(f"Error sending CAN message ID {hex(message_id)}: {e}")
+    def _send_can_messages(self):
+        """Sends a CAN message."""
+        while self.is_running:
+            try:
+                message = self.command_queue.get(timeout=1)  # Blocking read with timeout
+                if message is not None:
+                    can_id = message.arbitration_id
+                    logger.info(f"Sending CAN message: {hex(can_id)} - {binascii.hexlify(message.data)}")
+                    self.bus.send(message)
+            except Exception as e:
+                logger.error(f"Error sending/processing CAN message: {e}")

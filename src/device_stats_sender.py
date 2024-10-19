@@ -1,37 +1,40 @@
-import asyncio
 import logging
-from src.services.can_manager import CanManager
 import psutil
+import time
+from multiprocessing import Queue, Event
+from logging.handlers import QueueHandler
+
 logger = logging.getLogger('device_stats_sender')
 
 
 class DeviceStatsSender:
 
-    def __init__(self):
+    def __init__(self, can_out_queue: Queue, stop_event: Event, log_queue: Queue):
         super().__init__()
-        self._can_manager = None
-        self._running = False
-        self._task = None  # Track the task to ensure it's running
+        self._running = True
+        self.stop_event = stop_event # Event to signal process termination
+        self.can_out_queue = can_out_queue  # Queue for control commands
 
-    async def start(self):
+        # Set up QueueHandler for logging
+        queue_handler = QueueHandler(log_queue)
+        logger.addHandler(queue_handler)
+        logger.setLevel(logging.INFO)  # Set appropriate logging level
+
+    def start(self):
         try:
-            self._can_manager = CanManager()
             self._running = True
 
-            # Clear any existing faults
-            await self._can_manager.send_can_message(message_id=0x320, data=[0])
-
-            # Schedule the device stats sending task
-            self._task = asyncio.create_task(self._send_device_stats())
-
             logger.info("DeviceStatsSender started")
+
+            self._send_device_stats()  # Start sending stats synchronously
+
         except Exception as e:
             logger.error(f"Error starting DeviceStatsSender: {e}")
-            await self.stop()
+            self.stop()
 
-    async def _send_device_stats(self):
+    def _send_device_stats(self):
         """
-        Asynchronously send device health/fault data every 10 seconds.
+        Send device health/fault data every 10 seconds.
         """
         try:
             while self._running:
@@ -42,34 +45,27 @@ class DeviceStatsSender:
                 # Send CAN message based on health/fault conditions
                 if 60 < core_temp <= 70:
                     logger.warning("High temperature detected")
-                    await self._can_manager.send_can_message(message_id=0x320, data=[1])
+                    self.can_out_queue.put([1])
                 elif core_temp > 70:
                     logger.error("Critical temperature reached. Shutting down...")
-                    await self.stop()
+                    self.stop()
                 elif cpu_usage > 90:
                     logger.warning("High CPU usage detected")
-                    await self._can_manager.send_can_message(message_id=0x320, data=[6])
+                    self.can_out_queue.put([6])
                 else:
-                    await self._can_manager.send_can_message(message_id=0x320, data=[0])
+                    self.can_out_queue.put([0])
 
-                await self._can_manager.send_can_message(message_id=0x220, data=[core_temp, cpu_usage])
+                self.can_out_queue.put([core_temp, cpu_usage])
 
-                await asyncio.sleep(10)  # Simulating sending device stats every 10 seconds
-        except asyncio.CancelledError:
-            # Handle the task being cancelled properly here
-            raise  # Let the exception propagate to notify asyncio that it has been cancelled
+                # Sleep for 10 seconds
+                self.stop_event.wait(10)  # Use event wait for blocking
+
         except Exception as e:
             logger.error(f"Error in sending device stats: {e}")
 
-    async def stop(self):
+    def stop(self):
         """
         Stop the device stats sending and clean up resources.
         """
         self._running = False
-        if self._task:
-            self._task.cancel()  # Cancel the task if it's running
-            try:
-                await self._task  # Wait for the task to finish
-            except asyncio.CancelledError:
-                pass
         logger.info("DeviceStatsSender stopped")

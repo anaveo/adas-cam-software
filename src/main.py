@@ -1,22 +1,27 @@
 import os
 import json
+import multiprocessing
 import logging.config
-import asyncio
 import signal
+import time
+from logging.handlers import QueueHandler, QueueListener
 
 # Device stats sender
 from src.device_stats_sender import DeviceStatsSender
 
+# Video Streamer
+from src.video_streamer import VideoStreamer
+
 # Communication managers
-from src.services.network_manager import NetworkManager
 from src.services.can_manager import CanManager
 
 from src.services.udp_logger import UDPLogger
 import logging
+
 logger = logging.getLogger('main')
 
 
-def setup_logging(config_path='../config/logging_config.json'):
+def setup_logging(config_path='../config/logging_config.json', log_queue=None):
     # Get the absolute path of the directory where this script is located
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, config_path)
@@ -24,101 +29,64 @@ def setup_logging(config_path='../config/logging_config.json'):
     with open(config_path, 'r') as f:
         config = json.load(f)
         logging.config.dictConfig(config)
-        logging.info("Logging setup from config file complete.")
+        logger.info("Logging setup from config file complete.")
 
+    # If a log_queue is provided, set up a QueueHandler for the main logger
+    if log_queue:
+        queue_handler = QueueHandler(log_queue)
+        logger.addHandler(queue_handler)
+        logger.setLevel(logging.DEBUG)
+        logger.info("Logging queue for other processes initialized.")
 
-class Application:
-    def __init__(self):
-        self.device_stats_sender = None
-        self.net_manager = None
-        self.can_manager = None
-        self.loop = asyncio.get_event_loop()
+def main():
+    # Command queue for sending CAN messages
+    can_command_queue = multiprocessing.Queue()
 
-    async def start(self):
+    # Event for signalling process termination
+    stop_event = multiprocessing.Event()
 
-        # Set up necessary configurations
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        can_config_path = os.path.join(script_dir, '../config/can_config.json')
+    # Setup logging
+    log_queue = multiprocessing.Queue()
+    setup_logging(config_path='../config/logging_config.json', log_queue=log_queue)
+    listener = QueueListener(log_queue, *logging.getLogger('main').handlers)
+    listener.start()
 
-        # Initialize network manager
-        self.net_manager = NetworkManager()
-        await self.net_manager.start()
+    # Initialize CAN manager
+    can_manager = CanManager(can_command_queue)
+    can_manager.start()
 
-        # Initialize CAN manager
-        self.can_manager = CanManager(can_config_path=can_config_path)
-        await self.can_manager.start()
-        self.can_manager.register_callback_single_id(message_id=0x100, callback=self.shutdown_callback)
+    # Initialize and start the stats sender in a separate process
+    stats_sender_process = multiprocessing.Process(target=DeviceStatsSender(can_command_queue, stop_event, log_queue).start)
+    stats_sender_process.start()
 
-        # Initialize and start the device stats sender
-        self.device_stats_sender = DeviceStatsSender()
-        await self.device_stats_sender.start()
+    # Initialize and start the video streamer in a separate process with the queue for CAN messages
+    # camera_control_queue = multiprocessing.Queue()
+    # video_streamer_process = multiprocessing.Process(target=VideoStreamer, args=(command_queue, camera_control_queue, stop_event))
+    # video_streamer_process.start()
 
-        logger.info("Application started")
+    # Link video streamer with camera control CAN command
+    # can_manager.register_subscriber_single_id(0x120, camera_control_queue)
 
-        # Keep the event loop running
-        await asyncio.Event().wait()  # Keep the asyncio event loop alive
+    try:
+        while True:
+            time.sleep(1)  # Simulate work in the main thread
 
-    async def stop(self):
-        # Cleanly stop all managers and services
-        if self.device_stats_sender:
-            await self.device_stats_sender.stop()
-        if self.net_manager:
-            await self.net_manager.stop()
-        if self.can_manager:
-            await self.can_manager.stop()
+    except KeyboardInterrupt:
+        logger.info("Stopping CAN manager and subscribers...")
 
-        logger.info("Resources stopped successfully.")
+    finally:
+        # Signal processes to terminate
+        stop_event.set()
 
-    async def shutdown_callback(self):
-        """
-        Callback function to handle shutdown via CAN message or signal.
-        """
-        logger.info("Shutdown signal received. Stopping all services...")
+        # Clean up processes
+        stats_sender_process.join()
 
-        # Stop all resources
-        await self.stop()
+        # Clean up CAN manager
+        can_manager.stop()
 
-        # Call the close method on the UDP logger
-        for handler in logger.handlers:
-            if isinstance(handler, UDPLogger):
-                handler.close()
-
-        # Stop the event loop
-        self.loop.stop()  # Gracefully stop the loop
-
-        logger.info("Application shutdown complete.")
-
-
-async def main():
-    # Create the application instance
-    app = Application()
-
-    # Register a signal handler for clean shutdown (e.g., Ctrl+C or kill signal)
-    def handle_signal(signal, frame):
-        logger.info(f"Received signal: {signal}")
-        asyncio.create_task(app.shutdown_callback())  # Trigger the shutdown callback
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
-    # Start the application
-    await app.start()
+        # Stop the listener
+        listener.stop()
 
 
 if __name__ == '__main__':
-    # Set up logging
-    setup_logging(config_path='../config/logging_config.json')
-
-    # Create an asyncio event loop and run the application
-    try:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(main())
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-    finally:
-        # Ensure proper cleanup
-        try:
-            loop.run_until_complete(loop.shutdown_asyncgens())  # Clean up async generators
-        finally:
-            loop.close()
-        logger.info("Application exited.")
+    main()

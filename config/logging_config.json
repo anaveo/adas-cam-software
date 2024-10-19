@@ -17,19 +17,29 @@
         }
     },
     "loggers": {
+        "root": {
+            "level": "DEBUG",
+            "handlers": ["console", "udp"],
+            "propagate": false
+        },
         "main": {
             "level": "INFO",
-            "handlers": ["udp"],
+            "handlers": ["console", "udp"],
             "propagate": false
         },
         "device_stats_sender": {
-            "level": "WARNING",
-            "handlers": ["udp"],
+            "level": "INFO",
+            "handlers": ["console", "udp"],
+            "propagate": false
+        },
+        "video_streamer": {
+            "level": "INFO",
+            "handlers": ["console", "udp"],
             "propagate": false
         },
         "services.can_manager": {
-            "level": "WARNING",
-            "handlers": ["udp"],
+            "level": "INFO",
+            "handlers": ["console", "udp"],
             "propagate": false
         },
         "services.network_manager": {
